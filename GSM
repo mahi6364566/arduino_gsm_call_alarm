@@ -1,0 +1,212 @@
+#include <SoftwareSerial.h>
+
+SoftwareSerial sim800(7, 8);
+
+#define BUZZER_PIN 12
+
+const char fixedNumber[] = "+8801613302520";
+
+// -------- STATES --------
+enum CallState {
+  IDLE,
+  DIALING,
+  RINGING,
+  CONNECTED
+};
+
+CallState currentState = IDLE;
+
+String gsmLine = "";
+
+// Auto-answer variables
+unsigned long ringStartTime = 0;
+bool waitingAutoAnswer = false;
+
+// -------- SETUP --------
+void setup() {
+
+  Serial.begin(115200);
+  sim800.begin(9600);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, HIGH);
+
+  Serial.println("=== GSM SYSTEM (AUTO ANSWER) ===");
+
+  delay(2000);
+
+  sendAT("AT");
+  sendAT("ATE0");
+  sendAT("AT+CLIP=1");
+
+  Serial.println("Commands:");
+  Serial.println("call        → fixed number");
+  Serial.println("call <num>  → custom number");
+  Serial.println("hang        → hang call");
+}
+
+// -------- LOOP --------
+void loop() {
+
+  readSIM800();
+  readSerialCommand();
+  handleAutoAnswer();
+}
+
+// -------- READ SIM800 --------
+void readSIM800() {
+
+  while (sim800.available()) {
+
+    char c = sim800.read();
+
+    if (c == '\n' || c == '\r') {
+
+      if (gsmLine.length()) {
+        gsmLine.trim();
+        handleEvent(gsmLine);
+        gsmLine = "";
+      }
+
+    } else {
+      gsmLine += c;
+    }
+  }
+}
+
+// -------- HANDLE EVENTS --------
+void handleEvent(String line) {
+
+  Serial.print("SIM800L: ");
+  Serial.println(line);
+
+  // Incoming call
+  if (line.indexOf("RING") >= 0) {
+
+    if (currentState != RINGING) {
+      currentState = RINGING;
+      Serial.println("STATE: INCOMING CALL");
+
+      // Start auto-answer timer
+      ringStartTime = millis();
+      waitingAutoAnswer = true;
+    }
+  }
+
+  // Caller ID
+  if (line.indexOf("+CLIP:") >= 0) {
+    Serial.println("Caller Detected");
+  }
+
+  // Connected
+  if (line.indexOf("CONNECT") >= 0) {
+    currentState = CONNECTED;
+    waitingAutoAnswer = false;
+
+    Serial.println("STATE: CALL CONNECTED");
+  }
+
+  // Busy
+  if (line.indexOf("BUSY") >= 0) {
+    Serial.println("STATE: USER BUSY");
+
+    digitalWrite(BUZZER_PIN, LOW);
+    resetCall();
+  }
+
+  // Not Answered
+  if (line.indexOf("NO ANSWER") >= 0) {
+    Serial.println("STATE: NOT ANSWERED");
+
+    // keep buzzer HIGH
+    resetCall();
+  }
+
+  // Call End
+  if (line.indexOf("NO CARRIER") >= 0) {
+
+    if (currentState == CONNECTED) {
+      Serial.println("STATE: CALL ENDED (AFTER CONNECT)");
+    } else {
+      Serial.println("STATE: CALL FAILED / REJECTED");
+    }
+
+    digitalWrite(BUZZER_PIN, LOW);
+    resetCall();
+  }
+}
+
+// -------- AUTO ANSWER --------
+void handleAutoAnswer() {
+
+  if (waitingAutoAnswer && currentState == RINGING) {
+
+    if (millis() - ringStartTime >= 3000) {
+
+      Serial.println("Auto Answering Call...");
+      sim800.println("ATA");
+
+      waitingAutoAnswer = false;
+    }
+  }
+}
+
+// -------- RESET --------
+void resetCall() {
+  currentState = IDLE;
+  waitingAutoAnswer = false;
+}
+
+// -------- DIAL --------
+void dialNumber(String number) {
+
+  Serial.print("Dialing: ");
+  Serial.println(number);
+
+  sim800.print("ATD");
+  sim800.print(number);
+  sim800.println(";");
+
+  currentState = DIALING;
+}
+
+// -------- HANG --------
+void hangCall() {
+
+  Serial.println("Hanging up...");
+  sim800.println("ATH");
+
+  digitalWrite(BUZZER_PIN, LOW);
+  resetCall();
+}
+
+// -------- SERIAL COMMAND --------
+void readSerialCommand() {
+
+  if (Serial.available()) {
+
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "call") {
+      dialNumber(fixedNumber);
+    }
+    else if (cmd.startsWith("call ")) {
+      dialNumber(cmd.substring(5));
+    }
+    else if (cmd == "hang") {
+      hangCall();
+    }
+  }
+}
+
+// -------- AT --------
+void sendAT(String cmd) {
+
+  sim800.println(cmd);
+  delay(800);
+
+  while (sim800.available()) {
+    Serial.write(sim800.read());
+  }
+}
